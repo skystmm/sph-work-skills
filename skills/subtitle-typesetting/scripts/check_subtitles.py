@@ -19,7 +19,8 @@ import re
 MAX_LEN = 8
 
 # 允许的字符集：汉字、数字、大小写英文、% 、·（外国人名音译分隔符）
-ALLOWED = re.compile(r"^[\u4e00-\u9fff0-9A-Za-z%\u00b7]+$")
+# 注意：含 〇(U+3007，汉字数字零，如"二〇二四年")，其码位在 \u4e00-\u9fff 之外，需单独放行
+ALLOWED = re.compile(r"^[\u4e00-\u9fff\u30070-9A-Za-z%\u00b7]+$")
 
 # 常见不可拆分词组表（按需扩充）
 PHRASES = [
