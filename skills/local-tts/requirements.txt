@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+gradio
+pydantic
+pyyaml
+pypinyin
+jieba
+opencc-python-reimplemented
+soundfile
+numpy
+python-multipart
+httpx

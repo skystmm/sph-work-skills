@@ -1,0 +1,15 @@
+# 可插拔引擎配置 - 改一行即可切换基座
+engine: cosyvoice3  # 可选: cosyvoice3 | cosyvoice2 | macsay | f5tts | fishspeech | mock
+models_dir: ./models
+voices_dir: ./voices
+# 引擎特定配置
+engines:
+  cosyvoice3:
+    model_path: ./models/CosyVoice3
+    device: ""      # 留空=自动（Apple 芯片用 mps）；也可填 cpu / mps
+  cosyvoice2:
+    model_path: ./models/CosyVoice2
+    device: ""
+  macsay:
+    voice: Tingting  # 系统预置中文音色，可用 say -v '?' 查看
+  mock: {}

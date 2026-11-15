@@ -11,6 +11,7 @@
 | [book-video-script-rewrite](skills/book-video-script-rewrite/) | 图书类短视频文案深度二创与原创生成 | 掐头去尾（黄金钩子 + 转化闭环一字不动）、重塑中段（六策略工具箱组合深度重写，相似度 <20%）→ 多模式交付（二创 / 原创 / 口吻适配 / 标题简介 / 购买引导评论 / 框架对照补强） |
 | [short-video-compliance-judge](skills/short-video-compliance-judge/) | 短视频口播文案合规判定与改写 | 七类违规扫描（诱导互动 / 恐吓诅咒 / 道德绑架 / 悬念强迫 / 承诺诱导 / 无法验证的承诺 / 健康功效绝对化）→ 严重程度标注（🔴致命 / 🟡风险 / 🟢安全）→ 合规改写方案 → 账号处理建议（删 / 改 / 重发） |
 | [pronunciation-annotation](skills/pronunciation-annotation/) | 口播稿注音标注（照读优化） | 多音字 + 生僻字注音（`[字=pinyin+声调]` 格式，如 `[长=chang2]`、顾[恺=kai3]之）→ 注音版口播稿（含一键复制）→ 阿拉伯数字年份转中文（1948 年 → 一九四八年） |
+| [local-tts](skills/local-tts/) | 本地中文 TTS 语音生成 | 自定义音色、拼音注音、指定停顿和长文分块；模型及推理依赖需另行准备（[安装指南](skills/local-tts/install-guide.md)） |
 | [subtitle-typesetting](skills/subtitle-typesetting/) | 短视频字幕排版 | 按语义与口语节奏拆分每行 ≤8 字的无标点纯文本短句（可直接导入剪映 / PR / 必剪字幕轨道）→ 程序化校验脚本终检（每行字数 / 标点 / "的"不顶行 / 词组完整） |
 
 ## 典型工作流
@@ -35,7 +36,11 @@
 
 ## 安装方式
 
-将所需 skill 目录（如 `skills/short-video-compliance-judge/`）复制到本机 WorkBuddy 技能目录：
+`local-tts` 需要单独准备本地后端、推理依赖和模型，请参阅 [local-tts 安装指南](skills/local-tts/install-guide.md)。也可以将以下提示发送给支持本地技能和命令的 Agent：
+
+> 按照 `https://github.com/skystmm/sph-work-skills` 仓库的 `skills/local-tts/install-guide.md` 安装 `local-tts` skill。
+
+其他技能可将所需 skill 目录（如 `skills/short-video-compliance-judge/`）复制到本机 WorkBuddy 技能目录：
 
 ```bash
 # 用户级技能（推荐，所有项目可用）
