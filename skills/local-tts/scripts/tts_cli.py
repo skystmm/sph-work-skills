@@ -311,6 +311,33 @@ def task_pieces(directory, identity, chunks, engine, selected, speed, processor=
 
 
 def run(args):
+    if args.command != 'synth' or not getattr(args, 'offline', False):
+        return _run(args)
+
+    from app.model_preflight import offline_environment, validate_model
+    with offline_environment():
+        config = load_config()
+        model = args.model or config.get('engine', 'cosyvoice3')
+        if model not in ('cosyvoice2', 'cosyvoice3'):
+            raise ValueError('--offline 仅支持 cosyvoice2 和 cosyvoice3')
+        model_path = config.get('engines', {}).get(model, {}).get('model_path')
+        if not isinstance(model_path, str) or not model_path.strip():
+            raise ValueError('离线模式需要在配置中指定本地 model_path')
+        engine = engine_for(model)
+        if engine.model_dir.expanduser().resolve() != Path(model_path).expanduser().resolve():
+            raise ValueError('缓存的模型路径与配置不一致；请使用新进程')
+        if engine.is_loaded():
+            raise ValueError('模型已加载，无法确认离线状态；请在新进程中重试')
+        validate_model(engine.model_dir, model)
+        previous = engine.offline
+        engine.offline = True
+        try:
+            return _run(args)
+        finally:
+            engine.offline = previous
+
+
+def _run(args):
     config, store, settings = store_and_settings()
     if args.command == "models":
         result = []
@@ -469,6 +496,7 @@ def main():
     add_input(synth)
     synth.add_argument("--voice")
     synth.add_argument("--model")
+    synth.add_argument("--offline", action="store_true", help="仅从完整的本地 CosyVoice 模型目录加载")
     synth.add_argument("--speed", type=float, default=1.0)
     output = synth.add_mutually_exclusive_group()
     output.add_argument("--output", help="指定输出文件路径")

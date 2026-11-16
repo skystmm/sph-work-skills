@@ -12,6 +12,7 @@
 import sys
 import io
 import time
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ from app.engines.cosyvoice.pinyin_tokens import to_tokens
 REPO = Path(__file__).resolve().parents[3] / "third_party" / "CosyVoice"
 DEFAULT_PROMPT_WAV = REPO / "asset" / "zero_shot_prompt.wav"
 DEFAULT_PROMPT_TXT = "希望你以后能够做的比我还好呦。"
+_MODEL_LOAD_LOCK = threading.RLock()
 
 
 def _install_paths() -> None:
@@ -153,6 +155,7 @@ class CosyVoiceEngine(TTSEngine):
         self.device = device or cfg.get("device", "")  # '' = 自动（有 MPS 用 MPS）
         self._model = None
         self._loaded = False
+        self.offline = False
         self._spk_ids: set[str] = set()       # 已注册进 spk2info 的音色
         self._voice_prompt: dict[str, str] = {}  # voice_id -> spk_id
 
@@ -173,7 +176,11 @@ class CosyVoiceEngine(TTSEngine):
     def load(self) -> None:
         if self._loaded:
             return
-        if not self.model_dir.exists():
+        if self.offline:
+            from app.model_preflight import assert_offline_ready, validate_model
+            assert_offline_ready()
+            validate_model(self.model_dir, self.version)
+        if not self.offline and not self.model_dir.exists():
             raise FileNotFoundError(
                 f"{self.version} 权重未找到: {self.model_dir}\n"
                 f"请执行: bash scripts/download_model.sh {self.version}"
@@ -182,11 +189,18 @@ class CosyVoiceEngine(TTSEngine):
         _patch_load_wav()
 
         import torch
-        from cosyvoice.cli.cosyvoice import AutoModel
+        import cosyvoice.cli.cosyvoice as cosyvoice_cli
 
         t0 = time.time()
         print(f"[{self.version}] 加载权重 {self.model_dir} ...")
-        self._model = AutoModel(model_dir=str(self.model_dir))
+        with _MODEL_LOAD_LOCK:
+            if self.offline:
+                from app.model_preflight import block_snapshot_download, validate_model
+                model_dir = validate_model(self.model_dir, self.version)
+                with block_snapshot_download(cosyvoice_cli):
+                    self._model = cosyvoice_cli.AutoModel(model_dir=str(model_dir))
+            else:
+                self._model = cosyvoice_cli.AutoModel(model_dir=str(self.model_dir))
         dev = self._pick_device()
         if dev.type == "mps":
             _patch_hifigan_f0()

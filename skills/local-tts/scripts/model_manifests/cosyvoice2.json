@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "model": "cosyvoice2",
+  "repository": "iic/CosyVoice2-0.5B",
+  "revision": "6e3aa301f53582fa2de88625f89a29cb80d0fba1",
+  "files": [
+    {"path": "cosyvoice2.yaml", "size": 7330, "sha256": "0af2c0d010c477187c39f3e8fd5f1ae2e4e6f90ad03ba37c10ed6c6a87b05959"},
+    {"path": "llm.pt", "size": 2023316821, "sha256": "b144ef55b51ce8cfb79a73c90dbba0bdaba4e451c0ebcfab20f769264f84a608"},
+    {"path": "flow.pt", "size": 450575567, "sha256": "ff4c2f867674411e0a08cee702996df13fa67c1cd864c06108da88d16d088541"},
+    {"path": "hift.pt", "size": 83390254, "sha256": "3386cc880324d4e98e05987b99107f49e40ed925b8ecc87c1f4939432d429879"},
+    {"path": "campplus.onnx", "size": 28303423, "sha256": "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73"},
+    {"path": "speech_tokenizer_v2.onnx", "size": 496082973, "sha256": "d43342aa12163a80bf07bffb94c9de2e120a8df2f9917cd2f642e7f4219c6f71"},
+    {"path": "CosyVoice-BlankEN/config.json", "size": 659, "sha256": "168aa1bd401abc3bc262ba15ba4e499627a8b4e006e9d050b47c22de20660185"},
+    {"path": "CosyVoice-BlankEN/generation_config.json", "size": 242, "sha256": "e558847a8b4402616f1273797b015104dc266fe4b520056fca88823ba8f8ebe6"},
+    {"path": "CosyVoice-BlankEN/merges.txt", "size": 1402109, "sha256": "ac8ff86a72bee70828fbc1119bc4398c6f3a9a6e490d7b0dbe917be025478bd0"},
+    {"path": "CosyVoice-BlankEN/model.safetensors", "size": 988097824, "sha256": "130282af0dfa9fe5840737cc49a0d339d06075f83c5a315c3372c9a0740d0b96"},
+    {"path": "CosyVoice-BlankEN/tokenizer_config.json", "size": 1287, "sha256": "482bd979881423375ca5414e4e0d94cd7c5349dbb17fffd46b4d36d71e62a1bc"},
+    {"path": "CosyVoice-BlankEN/vocab.json", "size": 2776833, "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"}
+  ]
+}

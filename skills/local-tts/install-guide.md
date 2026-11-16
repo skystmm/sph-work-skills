@@ -26,9 +26,27 @@ bash "$VOICE_TTS_ROOT/scripts/download_model.sh" cosyvoice2
 
 CosyVoice2 的模型 ID 为 `iic/CosyVoice2-0.5B`，保存在 `models/CosyVoice2/`；不传参数时脚本默认下载 CosyVoice2，但本项目的拼音注音只支持 CosyVoice3。模型文件还需要上游源码及对应推理依赖，下载权重本身不代表模型已能运行。
 
-下载后检查每个文件和终端是否出现 `SOME_FAILED`；脚本会跳过非空文件，**不检查完整性或哈希，不能仅凭退出码判断成功**。下载中断时请对照模型发布方的文件清单及校验信息检查，勿将不完整文件当作可用权重。恢复可信备份时可先恢复原模型文件并核对配置，不必重复下载。
+安装器从 ModelScope 的固定 revision 获取必要文件，写入私有暂存目录；文件大小和 SHA-256 校验全部通过后才发布，下载中断可重新执行以续传。CosyVoice3 的固定 revision 为 `9f9c56f2514700ef79d64fd0afb693e0d672373b`，CosyVoice2 为 `6e3aa301f53582fa2de88625f89a29cb80d0fba1`。清单来自官方 ModelScope HTTPS 文件元数据，可检测传输损坏及版本变化，但不是独立签名。
 
-下载前检查上游来源、许可和模型文件完整性。模型、音色和生成音频不应提交到 GitHub。
+目标已存在时仅做只读校验，失败会返回非零状态，不覆盖或自动修复原文件。若需安装到新目录，请确保目标不存在且其父目录已存在：
+
+```bash
+bash "$VOICE_TTS_ROOT/scripts/download_model.sh" cosyvoice3 /绝对路径/新模型目录
+```
+
+也可将符合内置清单的可信本地备份导入到新目录（目标父目录须已存在）：
+
+```bash
+"$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/model_install.py" import cosyvoice3 /绝对路径/新模型目录 /绝对路径/备份模型目录
+```
+
+只读校验现有目录使用：
+
+```bash
+"$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/model_install.py" verify cosyvoice3 /绝对路径/模型目录
+```
+
+校验要求目录中的文件集合与清单一致；有额外文件时可能不通过，但不会删除它们。新目录不会自动设为当前模型，需用户自行确认 `config.yaml` 对应的 `model_path`。模型、音色和生成音频不应提交到 GitHub。
 
 ## 3. 安装 Agent 技能入口
 
@@ -63,6 +81,8 @@ CosyVoice2 的模型 ID 为 `iic/CosyVoice2-0.5B`，保存在 `models/CosyVoice2
 ```
 
 首次生成须选用已有音色，或通过 `voices add --id ID --name 名称 --audio 录音绝对路径 --prompt-text 逐字文本 --authorized` 注册本人或已获授权的声音；创建仅表示资料已保存，声音效果须试听。使用 `voices default 音色ID` 可设置默认，`synth --file 文章绝对路径 --voice 音色ID` 可生成长文音频。
+
+准备好本地模型与依赖后，CosyVoice2/3 合成可加 `--offline`；缺少必要文件会报错，已识别的模型下载回退会被阻止。此选项不是操作系统网络沙箱，不能保证所有第三方依赖都不联网；本项目曾在已有依赖的 macOS 机器上以网络隔离沙箱验证 CosyVoice3 短句，其他环境仍需分别验证。
 
 配置安装入口后，可向支持本机技能和命令的 Agent 发送：
 
