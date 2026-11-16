@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import contextlib
+import fcntl
+import hashlib
+import importlib.metadata
 import io
 import json
 import os
@@ -108,6 +111,205 @@ def engine_for(name):
     return engine
 
 
+# Bump whenever chunking, synthesis or the on-disk contract changes.
+TASK_VERSION = 1
+
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def model_identity(config, model, engine):
+    cfg = config.get('engines', {}).get(model, {})
+    model_path = cfg.get('model_path') or getattr(engine, 'default_model_dir', None)
+    if not model_path:
+        return None
+    root = Path(model_path)
+    if not root.exists():
+        raise ValueError(f'模型文件不存在: {root}')
+    if root.is_file():
+        files = [(root.name, file_hash(root))]
+    else:
+        files = []
+        for directory, dirs, names in os.walk(root, followlinks=False):
+            for name in sorted(dirs):
+                if (Path(directory) / name).is_symlink():
+                    raise ValueError('模型目录不能包含目录符号链接')
+            for name in sorted(names):
+                path = Path(directory) / name
+                if not path.is_file():
+                    raise ValueError(f'模型文件不可读取: {path}')
+                files.append((path.relative_to(root).as_posix(), file_hash(path)))
+        files.sort()
+    return {'path': str(root.resolve()), 'files': files}
+
+
+def runtime_identity():
+    source = [Path(__file__), ROOT / 'app/parser/chunker.py', ROOT / 'app/parser/ssml.py',
+              ROOT / 'app/engines/cosyvoice/engine.py', ROOT / 'app/engines/cosyvoice/pinyin_tokens.py']
+    upstream = ROOT / 'third_party/CosyVoice/cosyvoice'
+    if upstream.is_dir():
+        source.extend(sorted(upstream.rglob('*.py')))
+    packages = {}
+    for name in ('torch', 'torchaudio', 'transformers', 'numpy', 'soundfile', 'onnxruntime'):
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+    return {'python': sys.version, 'packages': packages,
+            'source_files': [(str(path.relative_to(ROOT)), file_hash(path)) for path in source]}
+
+
+def atomic_bytes(path, data):
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
+        tmp = Path(f.name)
+        try:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def atomic_json(path, data):
+    atomic_bytes(path, json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8'))
+
+
+def read_task_json(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f'任务记录缺失或不安全: {path}')
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (ValueError, OSError) as exc:
+        raise ValueError(f'任务记录损坏: {path}') from exc
+
+
+def checked_audio(data):
+    try:
+        samples, rate = sf.read(io.BytesIO(data), dtype='float32', always_2d=True)
+    except Exception as exc:
+        raise ValueError('音频损坏或格式无效') from exc
+    if not len(samples) or rate <= 0 or not np.isfinite(samples).all():
+        raise ValueError('生成的音频为空或无效')
+    return samples, rate
+
+
+@contextlib.contextmanager
+def task_lock(directory):
+    directory = Path(directory)
+    if directory.is_symlink():
+        raise ValueError('任务目录不能是符号链接')
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(directory / '.lock', os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError('任务目录正被其他进程使用') from exc
+        yield directory
+    finally:
+        os.close(fd)
+
+
+def synthesize_piece(engine, chunk, selected, speed):
+    req = TTSRequest(text=chunk['text'], phoneme_overrides=chunk['overrides'], breaks=chunk['breaks'],
+                     emphasis_spans=chunk['emphasis_spans'], voice_id=selected, speed=speed)
+    with contextlib.redirect_stdout(sys.stderr):
+        audio = engine.synthesize(req)
+    return checked_audio(audio)
+
+
+def task_pieces(directory, identity, chunks, engine, selected, speed, processor=None):
+    manifest = directory / 'task.json'
+    if not manifest.exists() and not manifest.is_symlink():
+        if any(p.name != '.lock' for p in directory.iterdir()):
+            raise ValueError('任务目录不是空目录且没有任务记录')
+        atomic_json(manifest, identity)
+    elif read_task_json(manifest) != identity:
+        raise ValueError('任务身份不兼容，拒绝恢复')
+    pieces, pending = {}, []
+    for i, chunk in enumerate(chunks):
+        record_path = directory / f'{i:06d}.json'
+        data = None
+        if record_path.exists() or record_path.is_symlink():
+            record = read_task_json(record_path)
+            if (not isinstance(record, dict) or set(record) != {'index', 'sha256', 'frames', 'sample_rate', 'channels'}
+                    or type(record['index']) is not int or record['index'] != i
+                    or not isinstance(record['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', record['sha256'])
+                    or any(type(record[key]) is not int or record[key] <= 0 for key in ('frames', 'sample_rate', 'channels'))):
+                raise ValueError(f'任务分块记录损坏: {record_path}')
+            wav = directory / (record['sha256'] + '.wav')
+            if wav.is_symlink() or (wav.exists() and not wav.is_file()):
+                raise ValueError(f'任务音频路径不安全: {wav}')
+            if wav.exists():
+                payload = wav.read_bytes()
+                corrupt = hashlib.sha256(payload).hexdigest() != record['sha256']
+                if not corrupt:
+                    try:
+                        data, sr = checked_audio(payload)
+                    except ValueError:
+                        corrupt = True
+                if corrupt:
+                    quarantine = directory / f'{wav.name}.corrupt-{uuid.uuid4().hex}'
+                    os.link(wav, quarantine, follow_symlinks=False)
+                    wav.unlink()
+                    data = None
+                elif (len(data), sr, data.shape[1]) != (record['frames'], record['sample_rate'], record['channels']):
+                    raise ValueError(f'任务分块记录属性不匹配: {record_path}')
+        if data is None:
+            pending.append((i, chunk))
+        else:
+            pieces[i] = (data, sr)
+
+    expected = {i for i, _ in pending}
+    def save(index, audio):
+        if index not in expected or index in pieces:
+            raise ValueError(f'重复或未知的分块结果: {index}')
+        data, sr = checked_audio(audio)
+        buf = io.BytesIO()
+        sf.write(buf, data, sr, format='WAV', subtype='FLOAT')
+        payload = buf.getvalue()
+        digest = hashlib.sha256(payload).hexdigest()
+        wav = directory / (digest + '.wav')
+        if wav.is_symlink() or (wav.exists() and (not wav.is_file() or file_hash(wav) != digest)):
+            raise ValueError(f'任务音频路径冲突: {wav}')
+        if not wav.exists():
+            atomic_bytes(wav, payload)
+        atomic_json(directory / f'{index:06d}.json', {'index': index, 'sha256': digest, 'frames': len(data), 'sample_rate': sr, 'channels': data.shape[1]})
+        pieces[index] = (data, sr)
+
+    if processor:
+        processor(pending, save)
+    else:
+        for i, chunk in pending:
+            print(f'正在合成 {i + 1}/{len(chunks)}', file=sys.stderr)
+            data, sr = synthesize_piece(engine, chunk, selected, speed)
+            buf = io.BytesIO()
+            sf.write(buf, data, sr, format='WAV', subtype='FLOAT')
+            save(i, buf.getvalue())
+    if len(pieces) != len(chunks):
+        raise ValueError('尚有分块未完成')
+    ordered = [pieces[i] for i in range(len(chunks))]
+    sample_rate, channels = ordered[0][1], ordered[0][0].shape[1]
+    if any(sr != sample_rate or data.shape[1] != channels for data, sr in ordered):
+        raise ValueError('生成的音频采样率或声道数不一致')
+    return [data for data, _ in ordered], sample_rate
+
+
 def run(args):
     config, store, settings = store_and_settings()
     if args.command == "models":
@@ -149,7 +351,8 @@ def run(args):
         parsed = parsed_input(text_input(args))
         return {"plain_text": parsed.plain_text, "phoneme_overrides": parsed.phoneme_overrides,
                 "breaks": parsed.breaks, "emphasis_spans": parsed.emphasis_spans}
-    parsed = parsed_input(text_input(args))
+    source_text = text_input(args)
+    parsed = parsed_input(source_text)
     selected = args.voice or settings_read(settings).get("default_voice")
     if not selected:
         raise ValueError("尚未指定音色且没有默认音色；请先列出音色并选择")
@@ -167,34 +370,76 @@ def run(args):
     if not 0.5 <= args.speed <= 2.0:
         raise ValueError("语速必须在 0.5 到 2.0 之间")
     from app.parser.chunker import chunk_text_with_metadata
-    chunks = chunk_text_with_metadata(parsed.plain_text, parsed.phoneme_overrides, parsed.breaks, parsed.emphasis_spans)
-    pieces = []
-    sample_rate = None
-    for i, chunk in enumerate(chunks):
-        print(f"正在合成 {i + 1}/{len(chunks)}", file=sys.stderr)
-        req = TTSRequest(text=chunk["text"], phoneme_overrides=chunk["overrides"], breaks=chunk["breaks"],
-                         emphasis_spans=chunk["emphasis_spans"], voice_id=selected, speed=args.speed)
-        with contextlib.redirect_stdout(sys.stderr):
-            audio = engine.synthesize(req)
-        data, sr = sf.read(io.BytesIO(audio), dtype="float32", always_2d=True)
-        if not len(data) or (sample_rate is not None and sr != sample_rate):
-            raise ValueError("生成的音频为空或采样率不一致")
-        sample_rate = sr
-        pieces.append(data)
-    result = np.concatenate(pieces, axis=0)
-    out = Path(args.output) if args.output else ROOT / "output" / f"tts_{uuid.uuid4().hex}.wav"
-    if out.exists():
+    chunks = chunk_text_with_metadata(parsed.plain_text, parsed.phoneme_overrides, parsed.breaks,
+                                      parsed.emphasis_spans, min_len=40, max_len=80)
+    chunks = [chunk for chunk in chunks if chunk["text"].strip() or chunk["breaks"]]
+    requested_workers = str(getattr(args, 'workers', '1'))
+    if requested_workers not in ('1', '2', '4', 'auto'):
+        raise ValueError('workers 必须是 auto、1、2 或 4')
+    if requested_workers in ('2', '4'):
+        raise ValueError('真实多路执行尚未通过进程生命周期安全验证，当前不可用')
+    worker_reason = None
+    if requested_workers == 'auto':
+        worker_reason = '真实多路安全验证尚未完成，保守使用单路；未执行校准'
+        print(worker_reason, file=sys.stderr)
+    output_file = getattr(args, 'output', None)
+    output_dir = getattr(args, 'output_dir', None)
+    if output_file and output_dir:
+        raise ValueError('--output 与 --output-dir 不能同时使用')
+    configured_dir = output_dir or (os.environ.get('VOICE_TTS_OUTPUT_DIR') if not output_file else None)
+    if configured_dir:
+        output_root = Path(configured_dir).expanduser()
+        if not output_root.is_absolute():
+            raise ValueError('输出目录必须是绝对路径')
+    else:
+        output_root = ROOT / 'output'
+    out = Path(output_file) if output_file else output_root / f'tts_{uuid.uuid4().hex}.wav'
+    if out.exists() or out.is_symlink():
         raise ValueError(f"输出文件已存在: {out}")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(suffix=".wav", dir=out.parent, delete=False) as tmp:
-        temp_path = Path(tmp.name)
-    try:
-        sf.write(str(temp_path), result, sample_rate, format="WAV")
-        os.link(temp_path, out)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    task_dir = getattr(args, 'task_dir', None)
+    if requested_workers == 'auto' and not task_dir:
+        cache_root = out.parent
+        cache_root.mkdir(parents=True, exist_ok=True)
+        task_dir = tempfile.mkdtemp(prefix='tts-task-', dir=cache_root)
+        print(f'可恢复任务目录: {task_dir}', file=sys.stderr)
+    if task_dir and out.resolve().is_relative_to(Path(task_dir).resolve()):
+        raise ValueError('输出文件不能位于任务目录内')
+    lock = task_lock(task_dir) if task_dir else contextlib.nullcontext(None)
+    with lock as directory:
+        if directory is not None:
+            meta = lookup_voice(store, selected)
+            identity = {'version': TASK_VERSION, 'text': source_text, 'plain_text': parsed.plain_text,
+                        'overrides': parsed.phoneme_overrides, 'breaks': parsed.breaks,
+                        'emphasis_spans': parsed.emphasis_spans, 'chunks': chunks,
+                        'voice_id': selected, 'voice_metadata': meta,
+                        'voice_wav_sha256': file_hash(store.base / selected / 'ref.wav'),
+                        'model': model, 'config': config, 'model_files': model_identity(config, model, engine),
+                        'runtime': runtime_identity(), 'speed': args.speed}
+            # Normalize tuples and integer keys to the exact persisted JSON representation.
+            identity = json.loads(json.dumps(identity, ensure_ascii=False, sort_keys=True))
+            pieces, sample_rate = task_pieces(directory, identity, chunks, engine, selected, args.speed)
+        else:
+            pieces, sample_rate, channels = [], None, None
+            for i, chunk in enumerate(chunks):
+                print(f"正在合成 {i + 1}/{len(chunks)}", file=sys.stderr)
+                data, sr = synthesize_piece(engine, chunk, selected, args.speed)
+                if sample_rate is not None and (sr != sample_rate or data.shape[1] != channels):
+                    raise ValueError("生成的音频采样率或声道数不一致")
+                sample_rate, channels = sr, data.shape[1]
+                pieces.append(data)
+        result = np.concatenate(pieces, axis=0)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(suffix=".wav", dir=out.parent, delete=False) as tmp:
+            temp_path = Path(tmp.name)
+        try:
+            sf.write(str(temp_path), result, sample_rate, format="WAV")
+            os.link(temp_path, out)
+        finally:
+            temp_path.unlink(missing_ok=True)
     return {"output": str(out.resolve()), "voice_id": selected, "model": model, "sample_rate": sample_rate,
-            "duration_seconds": round(len(result) / sample_rate, 3), "chunks": len(chunks)}
+            "duration_seconds": round(len(result) / sample_rate, 3), "chunks": len(chunks),
+            "requested_workers": requested_workers, "actual_workers": 1, "worker_reason": worker_reason,
+            "task_dir": str(Path(task_dir).resolve()) if task_dir else None}
 
 
 def add_input(parser):
@@ -225,7 +470,12 @@ def main():
     synth.add_argument("--voice")
     synth.add_argument("--model")
     synth.add_argument("--speed", type=float, default=1.0)
-    synth.add_argument("--output")
+    output = synth.add_mutually_exclusive_group()
+    output.add_argument("--output", help="指定输出文件路径")
+    output.add_argument("--output-dir", help="指定绝对输出目录并自动命名 WAV")
+    synth.add_argument("--task-dir", help="显式指定可恢复任务目录")
+    synth.add_argument("--workers", choices=('auto', '1', '2', '4'), default='1',
+                       help="auto 暂时保守使用单路；真实多路尚不可用")
     args = parser.parse_args()
     try:
         result = run(args)
