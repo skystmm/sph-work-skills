@@ -19,6 +19,7 @@ MANIFESTS = Path(__file__).resolve().parent / 'model_manifests'
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
 HEX40 = re.compile(r'[0-9a-fA-F]{40}\Z')
 HEX64 = re.compile(r'[0-9a-fA-F]{64}\Z')
+HF_SOURCES = ('https://huggingface.co', 'https://hf-mirror.com')
 
 
 class InstallError(Exception):
@@ -26,8 +27,12 @@ class InstallError(Exception):
 
 
 def validate_manifest(m, expected=None):
-    if not isinstance(m, dict) or set(m) != {'schema', 'model', 'repository', 'revision', 'files'}:
+    if not isinstance(m, dict) or set(m) not in (
+            {'schema', 'model', 'repository', 'revision', 'files'},
+            {'schema', 'model', 'repository', 'revision', 'files', 'source'}):
         raise InstallError('invalid manifest fields')
+    if 'source' in m and m['source'] != 'huggingface':
+        raise InstallError('unsupported model source')
     if type(m['schema']) is not int or m['schema'] != 1:
         raise InstallError('unsupported manifest schema')
     model, repo, rev = m['model'], m['repository'], m['revision']
@@ -156,6 +161,23 @@ def publish_noreplace(source, destination):
 
 
 def download(entry, path, manifest, base_url):
+    if manifest.get('source') == 'huggingface':
+        suffix = '/' + manifest['repository'] + '/resolve/' + manifest['revision'] + '/'
+        suffix += urllib.parse.quote(entry['path'], safe='/')
+        for index, origin in enumerate(HF_SOURCES):
+            try:
+                return download_url(entry, path, origin + suffix)
+            except (InstallError, OSError, http.client.HTTPException) as exc:
+                if index + 1 == len(HF_SOURCES):
+                    raise InstallError('official and mirror downloads failed: ' + entry['path']) from exc
+                print('official model download failed; trying mirror: ' + entry['path'], file=sys.stderr)
+    else:
+        query = urllib.parse.urlencode({'Revision': manifest['revision'], 'FilePath': entry['path']})
+        url = base_url.rstrip('/') + '/api/v1/models/' + manifest['repository'] + '/repo?' + query
+        return download_url(entry, path, url)
+
+
+def download_url(entry, path, url):
     fd = regular_open(path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(fd, 'r+b') as out:
         size = os.fstat(out.fileno()).st_size
@@ -170,8 +192,6 @@ def download(entry, path, manifest, base_url):
                 out.seek(0)
                 out.truncate()
                 size = 0
-        query = urllib.parse.urlencode({'Revision': manifest['revision'], 'FilePath': entry['path']})
-        url = base_url.rstrip('/') + '/api/v1/models/' + manifest['repository'] + '/repo?' + query
         request = urllib.request.Request(url, headers={'Range': 'bytes=%d-' % size} if size else {})
         with urllib.request.urlopen(request, timeout=30) as response:
             status = response.status

@@ -160,6 +160,15 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '身份不兼容'):
             self.task_synth(text='你好。', output='another.wav')
 
+    def test_adapter_runtime_identity_rejects_changes(self):
+        engine = cli.engine_for('mock')
+        with patch.object(engine, 'resume_identity', return_value={'version': 'one'}):
+            self.task_synth(text='你好。')
+        with patch.object(engine, 'resume_identity', return_value={'version': 'two'}):
+            with self.assertRaisesRegex(ValueError, '身份不兼容'):
+                self.task_synth(text='你好。', output='another.wav')
+        self.assertFalse(Path('another.wav').exists())
+
     def test_model_file_and_configuration_identity(self):
         Path('weights').mkdir()
         Path('weights/model.bin').write_bytes(b'original')

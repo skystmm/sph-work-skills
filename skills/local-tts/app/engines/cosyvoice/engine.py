@@ -19,7 +19,7 @@ import numpy as np
 import soundfile as sf
 
 from app.engines import TTSEngine
-from app.engines.base import TTSRequest, TTSCapability
+from app.engines.base import ProviderPlan, ProviderStep, TTSRequest, TTSCapability
 from app.engines.registry import register
 from app.engines.cosyvoice.pinyin_tokens import to_tokens
 
@@ -143,6 +143,7 @@ def split_by_breaks(plain: str, overrides: dict, breaks: list):
 
 
 class CosyVoiceEngine(TTSEngine):
+    backend = 'pytorch'
     version = "cosyvoice2"
     default_model_dir = "./models/CosyVoice2"
     supports_pinyin_inpaint = False
@@ -169,7 +170,60 @@ class CosyVoiceEngine(TTSEngine):
             supports_chinese=True,
             clone_mode="zero_shot",
             sample_rate=24000,
+            supports_speed=True,
         )
+
+    def resume_identity(self) -> None:
+        return None
+
+    def validate_request(self, req: TTSRequest) -> None:
+        super().validate_request(req)
+        if req.phoneme_overrides:
+            import re
+            from scripts.verify_pinyin_tokens import load_vocab
+            vocab = load_vocab()
+            for py in req.phoneme_overrides.values():
+                if not re.fullmatch(r'[a-züv]+[0-4]', py):
+                    raise ValueError(f'拼音必须包含声调数字 0-4: {py}')
+                tokens = re.findall(r'\[[^\[\]]+\]', to_tokens(py))
+                if not tokens or any(token not in vocab for token in tokens):
+                    raise ValueError(f'模型词表不支持该拼音: {py}')
+
+    def compile_input(self, req: TTSRequest) -> ProviderPlan:
+        self.validate_request(req)
+        segs, gaps = split_by_breaks(req.text, req.phoneme_overrides, req.breaks)
+        steps = []
+        for i, ((seg_text, seg_ov), base) in enumerate(zip(segs, _offsets(segs))):
+            original_end = base + len(seg_text)
+            if seg_text.strip():
+                spans = [(max(a, base) - base, min(b, base + len(seg_text)) - base)
+                         for a, b in req.emphasis_spans
+                         if max(a, base) < min(b, base + len(seg_text))]
+                parts = ([apply_pinyin_inpaint(ch, {0: seg_ov.get(j)})
+                          for j, ch in enumerate(seg_text)] if self.supports_pinyin_inpaint else list(seg_text))
+                positions = [0]
+                for part in parts:
+                    positions.append(positions[-1] + len(part))
+                spans = [(positions[a], positions[b]) for a, b in spans]
+                merged = []
+                for a, b in sorted(spans):
+                    if merged and a < merged[-1][1]:
+                        merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+                    else:
+                        merged.append((a, b))
+                mapping = []
+                for j, part in enumerate(parts):
+                    start = positions[j] + sum((len('<strong>') if a <= positions[j] else 0)
+                                               + (len('</strong>') if b <= positions[j] else 0)
+                                               for a, b in merged)
+                    mapping.append((base + j, base + j + 1, start, start + len(part)))
+                steps.append(ProviderStep(kind='speak', text=apply_emphasis(''.join(parts), spans),
+                                          source_start=base, source_end=original_end,
+                                          source_map=tuple(mapping)))
+            if i < len(gaps):
+                steps.append(ProviderStep(kind='silence', milliseconds=round(gaps[i] * 1000),
+                                          source_start=original_end, source_end=original_end))
+        return ProviderPlan(version=1, steps=tuple(steps), request=req)
 
     # ---- 生命周期 ----
 
@@ -271,31 +325,18 @@ class CosyVoiceEngine(TTSEngine):
     # ---- 合成 ----
 
     def synthesize(self, req: TTSRequest) -> bytes:
-        if not self._loaded:
-            self.load()
+        return self.execute_plan(self.compile_input(req))
 
-        segs, gaps = split_by_breaks(req.text, req.phoneme_overrides, req.breaks)
-        offsets = _offsets(segs)
+    def execute_plan(self, plan: ProviderPlan) -> bytes:
+        req = plan.request
+        self.open_session()
         spk_id = self._resolve_voice(req.voice_id)
-
         chunks = []
-        for i, ((seg_text, seg_ov), base) in enumerate(zip(segs, offsets)):
-            if seg_text.strip():
-                spans = [(max(a, base) - base, min(b, base + len(seg_text)) - base)
-                         for a, b in req.emphasis_spans
-                         if max(a, base) < min(b, base + len(seg_text))]
-                if self.supports_pinyin_inpaint:
-                    # 先逐字替换，再将原文坐标映射到 token 文本，避免标签或 token 改变下标。
-                    parts = [apply_pinyin_inpaint(ch, {0: seg_ov.get(j)})
-                             for j, ch in enumerate(seg_text)]
-                    positions = [0]
-                    for part in parts:
-                        positions.append(positions[-1] + len(part))
-                    seg_text = "".join(parts)
-                    spans = [(positions[a], positions[b]) for a, b in spans]
-                chunks.append(self._infer(apply_emphasis(seg_text, spans), spk_id, req.speed))
-            if i < len(gaps):
-                chunks.append(self._silence(gaps[i]))
+        for step in plan.steps:
+            if step.kind == 'speak':
+                chunks.append(self._infer(step.text, spk_id, req.speed))
+            elif step.kind == 'silence':
+                chunks.append(self._silence(step.milliseconds / 1000.0))
 
         chunks = [c for c in chunks if len(c)]
         audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)

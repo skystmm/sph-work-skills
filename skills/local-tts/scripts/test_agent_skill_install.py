@@ -37,6 +37,13 @@ class InstallerTests(unittest.TestCase):
         skill = self.home / '.agents/skills/local-tts/SKILL.md'
         installed = skill.read_text(encoding='utf-8')
         self.assertIn(str(self.root), installed)
+        for target in ('.agents', '.codebuddy'):
+            text = (self.home / target / 'skills/local-tts/SKILL.md').read_text(encoding='utf-8')
+            self.assertIn('用户未指定模型时，每次 `synth` 显式传入 `--model voxcpm2`', text)
+            self.assertIn('用户指定模型时仅传入用户指定的模型', text)
+            self.assertIn('不静默切换', text)
+            self.assertIn('仅当用户明确选择时，VoxCPM 可在 `parse` 和 `synth` 使用 `--reference-mode reference_plus_prompt`', text)
+            self.assertIn('默认模式仍为 `reference`', text)
         assignment = next(line for line in installed.splitlines() if line.startswith('VOICE_TTS_ROOT='))
         import os
         env = os.environ.copy()
