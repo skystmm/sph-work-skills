@@ -1,3 +1,5 @@
+import importlib
+from pathlib import Path
 from typing import Dict, Type
 from . import TTSEngine
 
@@ -7,6 +9,8 @@ _INSTANCES: Dict[str, TTSEngine] = {}
 
 def register(name: str):
     def decorator(cls: Type[TTSEngine]):
+        if name in REGISTRY:
+            raise ValueError(f"重复的引擎 ID: {name}")
         REGISTRY[name] = cls
         cls.name = name
         return cls
@@ -36,13 +40,16 @@ def list_engines() -> list[str]:
     return list(REGISTRY.keys())
 
 def _import_engines():
-    # 触发各引擎模块的 @register 装饰器
-    import app.engines.cosyvoice.engine  # noqa: F401  注册 cosyvoice2 / cosyvoice3
-    import app.engines.f5tts.engine  # noqa: F401
-    import app.engines.fishspeech.engine  # noqa: F401
-    # mock 引擎始终可用，用于无权重开发
-    import app.engines.mock_engine  # noqa: F401
-    # macOS say，无需模型即可出真实语音
-    import app.engines.macsay  # noqa: F401
+    root = Path(__file__).parent
+    modules = ["app.engines.macsay", "app.engines.mock_engine"]
+    modules.extend(
+        f"app.engines.{path.name}.engine"
+        for path in root.iterdir()
+        if path.is_dir() and path.name.isidentifier()
+        and not path.is_symlink() and (path / "engine.py").is_file()
+        and not (path / "engine.py").is_symlink()
+    )
+    for module in sorted(modules):
+        importlib.import_module(module)
 
 _import_engines()

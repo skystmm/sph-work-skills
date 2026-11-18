@@ -1,5 +1,5 @@
 # 可插拔引擎配置 - 改一行即可切换基座
-engine: cosyvoice3  # 可选: cosyvoice3 | cosyvoice2 | macsay | f5tts | fishspeech | mock
+engine: cosyvoice3  # 可选: cosyvoice3 | cosyvoice2 | qwen3tts | voxcpm2 | macsay | mock
 models_dir: ./models
 voices_dir: ./voices
 # 引擎特定配置
@@ -10,6 +10,12 @@ engines:
   cosyvoice2:
     model_path: ./models/CosyVoice2
     device: ""
+  qwen3tts:
+    model_path: ./models/Qwen3-TTS
+    python: ./.venv-mlx/bin/python
+  voxcpm2:
+    model_path: ./models/VoxCPM2
+    python: ./.venv-mlx/bin/python
   macsay:
     voice: Tingting  # 系统预置中文音色，可用 say -v '?' 查看
   mock: {}

@@ -50,6 +50,7 @@ def chunk_text_with_metadata(
     emphasis_spans: list | None = None,
     max_len: int = 120,
     min_len: int = 12,
+    emotion_spans: list | None = None,
 ) -> list[dict]:
     """按原文坐标分块并映射全部元数据。
 
@@ -78,7 +79,7 @@ def chunk_text_with_metadata(
                 local_breaks.append((0, break_at[0]))
             if stop in break_at:
                 local_breaks.append((len(piece), break_at[stop]))
-            chunks.append({
+            chunk = {
                 "text": piece,
                 "overrides": {i - offset: value for i, value in overrides.items()
                               if offset <= i < stop},
@@ -86,13 +87,72 @@ def chunk_text_with_metadata(
                 "emphasis_spans": [(max(a, offset) - offset, min(b, stop) - offset)
                                    for a, b in emphasis_spans
                                    if max(a, offset) < min(b, stop)],
-            })
+            }
+            local_emotions = [(max(a, offset) - offset, min(b, stop) - offset, value)
+                              for a, b, value in emotion_spans or []
+                              if max(a, offset) < min(b, stop)]
+            if local_emotions:
+                chunk['emotion_spans'] = local_emotions
+            chunks.append(chunk)
             offset = stop
 
     if not chunks and break_at:
         chunks.append({"text": "", "overrides": {},
                        "breaks": [(0, break_at[0])], "emphasis_spans": []})
     return chunks
+
+
+def validate_chunk_plan(document, chunks):
+    if not isinstance(chunks, list) or any(not isinstance(chunk, dict) or not isinstance(chunk.get('text'), str) for chunk in chunks):
+        raise ValueError('模型分块计划无效')
+    if ''.join(chunk['text'] for chunk in chunks) != document.plain_text:
+        raise ValueError('模型分块计划修改或遗漏原文')
+    overrides, breaks, emphasis, emotions = {}, {}, [], []
+    offset = 0
+    for chunk in chunks:
+        length = len(chunk['text'])
+        local_overrides = chunk.get('overrides')
+        local_breaks = chunk.get('breaks')
+        local_emphasis = chunk.get('emphasis_spans')
+        local_emotions = chunk.get('emotion_spans', [])
+        if not isinstance(local_overrides, dict) or not all(isinstance(value, list) for value in (local_breaks, local_emphasis, local_emotions)):
+            raise ValueError('模型分块控制项格式无效')
+        for pos, value in local_overrides.items():
+            if type(pos) is not int or not 0 <= pos < length or not isinstance(value, str):
+                raise ValueError('模型分块注音位置无效')
+            overrides[offset + pos] = value
+        for pos, milliseconds in local_breaks:
+            if type(pos) is not int or not 0 <= pos <= length or type(milliseconds) is not int or milliseconds < 0:
+                raise ValueError('模型分块停顿无效')
+            breaks[offset + pos] = breaks.get(offset + pos, 0) + milliseconds
+        for a, b in local_emphasis:
+            if type(a) is not int or type(b) is not int or not 0 <= a < b <= length:
+                raise ValueError('模型分块重音范围无效')
+            emphasis.append((offset + a, offset + b, True))
+        for a, b, value in local_emotions:
+            if type(a) is not int or type(b) is not int or not 0 <= a < b <= length or not isinstance(value, str):
+                raise ValueError('模型分块情绪范围无效')
+            emotions.append((offset + a, offset + b, value))
+        offset += length
+
+    def ranges(values):
+        result = []
+        for a, b, value in sorted(values):
+            if result and a < result[-1][1]:
+                raise ValueError('模型分块控制范围重叠')
+            if result and a == result[-1][1] and value == result[-1][2]:
+                result[-1] = (result[-1][0], b, value)
+            else:
+                result.append((a, b, value))
+        return result
+
+    expected_breaks = {}
+    for pos, milliseconds in document.breaks:
+        expected_breaks[pos] = expected_breaks.get(pos, 0) + milliseconds
+    if (overrides != document.phoneme_overrides or breaks != expected_breaks
+            or ranges(emphasis) != ranges((a, b, True) for a, b in document.emphasis_spans)
+            or ranges(emotions) != ranges(document.emotion_spans)):
+        raise ValueError('模型分块计划修改或遗漏控制项')
 
 
 def chunk_text(

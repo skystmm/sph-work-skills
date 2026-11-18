@@ -1,7 +1,15 @@
 .venv/
+.venv-mlx/
 models/
 voices/
 output/
 third_party/
 __pycache__/
 *.py[cod]
+.env
+.env.*
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.flac

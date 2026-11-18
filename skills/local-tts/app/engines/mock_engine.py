@@ -10,6 +10,7 @@ from app.engines.registry import register
 
 @register("mock")
 class MockEngine(TTSEngine):
+    backend = 'mock'
     name = "mock"
     capability = TTSCapability(
         supports_phoneme=True,
@@ -19,11 +20,15 @@ class MockEngine(TTSEngine):
         supports_chinese=True,
         clone_mode="zero_shot",
         sample_rate=22050,
+        supports_speed=True,
     )
 
     def __init__(self):
         self._loaded = False
         self._voices: dict[str, str] = {}
+
+    def resume_identity(self) -> None:
+        return None
 
     def load(self) -> None:
         self._loaded = True
@@ -38,13 +43,29 @@ class MockEngine(TTSEngine):
         return voice_id
 
     def synthesize(self, req: TTSRequest) -> bytes:
+        self.validate_request(req)
         if not self._loaded:
             self.load()
         # 生成一段演示用正弦波，时长与文本长度相关，便于验证链路
         # 实际接入真实引擎时，这里替换为模型推理
-        duration = max(1.0, len(req.text) * 0.15 + sum(ms for _, ms in req.breaks) / 1000.0)
-        # 重音段稍微提升频率以示区分
+        duration = max(1.0, len(req.text) * 0.15)
         wav = self._sine_wav(duration, freq=220, sample_rate=self.capability.sample_rate)
+        if req.breaks:
+            samples = wav[44:] if req.text.strip() else b''
+            frames = len(samples) // 2
+            position = 0
+            pieces = []
+            for index, milliseconds in sorted(req.breaks):
+                frame = round(frames * index / len(req.text)) if req.text else 0
+                pieces.extend((samples[position * 2:frame * 2], b'\0\0' * round(self.capability.sample_rate * milliseconds / 1000)))
+                position = frame
+            pieces.append(samples[position * 2:])
+            pcm = b''.join(pieces)
+            wav = (b'RIFF' + struct.pack('<I', 36 + len(pcm)) + b'WAVEfmt '
+                   + struct.pack('<IHHIIHH', 16, 1, 1, self.capability.sample_rate,
+                                 self.capability.sample_rate * 2, 2, 16)
+                   + b'data' + struct.pack('<I', len(pcm)) + pcm)
+        duration = (len(wav) - 44) / (2 * self.capability.sample_rate)
         # 在返回前打印解析结果，便于验证 SSML 是否生效
         print(f"[MockEngine] text='{req.text}' overrides={req.phoneme_overrides} breaks={req.breaks} emphasis={req.emphasis_spans} -> {duration:.1f}s wav")
         time.sleep(0.1)

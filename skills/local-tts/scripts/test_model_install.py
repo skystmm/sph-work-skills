@@ -28,6 +28,8 @@ def manifest(data=DATA, path='weights/model.bin'):
 class Handler(http.server.BaseHTTPRequestHandler):
     mode = 'normal'
     requests_seen = []
+    request_paths = []
+    authorization_headers = []
 
     def log_message(self, *args):
         pass
@@ -35,8 +37,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         range_header = self.headers.get('Range')
         self.requests_seen.append(range_header)
+        self.request_paths.append(self.path)
+        self.authorization_headers.append(self.headers.get('Authorization'))
         start = int(range_header[6:-1]) if range_header else 0
         mode = type(self).mode
+        if mode == 'primary-fails':
+            if self.path.startswith('/primary/'):
+                self.send_error(503)
+                return
+            mode = 'normal'
+        elif mode == 'primary-corrupt':
+            mode = 'corrupt' if self.path.startswith('/primary/') else 'normal'
         if range_header and mode != 'ignore':
             self.send_response(206)
             first = start + 1 if mode == 'bad-range' else start
@@ -76,12 +87,34 @@ class InstallerTest(unittest.TestCase):
         self.stage = self.root / '.model.install-staging'
         Handler.mode = 'normal'
         Handler.requests_seen = []
+        Handler.request_paths = []
+        Handler.authorization_headers = []
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def install(self):
         return mi.run_operation('install', manifest(), self.dest, base_url=self.url)
+
+    def test_hf_mirror_fallback_without_token(self):
+        m = dict(manifest(), source='huggingface')
+        for mode in ('primary-fails', 'primary-corrupt'):
+            with self.subTest(mode=mode):
+                dest = self.root / mode
+                Handler.mode = mode
+                Handler.request_paths = []
+                Handler.authorization_headers = []
+                with mock.patch.object(mi, 'HF_SOURCES', (self.url + '/primary', self.url + '/mirror')), \
+                        mock.patch.dict(os.environ, {'HF_TOKEN': 'secret-token',
+                                                     'HUGGING_FACE_HUB_TOKEN': 'other-secret'}):
+                    self.assertEqual(mi.run_operation('install', m, dest), 'installed')
+                self.assertEqual((dest / 'weights/model.bin').read_bytes(), DATA)
+                self.assertEqual(len(Handler.request_paths), 2)
+                self.assertTrue(Handler.request_paths[0].startswith('/primary/'))
+                self.assertTrue(Handler.request_paths[1].startswith('/mirror/'))
+                self.assertTrue(all('/resolve/' + 'a' * 40 + '/' in path for path in Handler.request_paths))
+                self.assertEqual(Handler.authorization_headers, [None, None])
+                mi.run_operation('verify', m, dest)
 
     def test_interruption_and_range_resume(self):
         Handler.mode = 'interrupt'

@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import os
 import sys
 import tempfile
@@ -12,6 +13,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app import model_preflight as preflight
 from app.engines.cosyvoice.engine import CosyVoice3Engine
 import tts_cli
+
+
+@contextlib.contextmanager
+def patched_modules(modules):
+    missing = object()
+    saved = {key: sys.modules.get(key, missing) for key in modules}
+    try:
+        sys.modules.update(modules)
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is missing:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = value
 
 
 def fixture(root, version):
@@ -58,7 +74,7 @@ class OfflineTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 preflight.assert_offline_ready()
         for name in ('huggingface_hub.constants', 'transformers'):
-            with patch.dict(sys.modules, {name: types.ModuleType(name)}):
+            with patched_modules({name: types.ModuleType(name)}):
                 with self.assertRaisesRegex(RuntimeError, '已导入'):
                     with preflight.offline_environment():
                         pass
@@ -94,8 +110,8 @@ class OfflineTests(unittest.TestCase):
             sub.cosyvoice = cli
             package.cli = sub
             fake_modules = {'cosyvoice': package, 'cosyvoice.cli': sub,
-                            'cosyvoice.cli.cosyvoice': cli}
-            with patch.dict(sys.modules, fake_modules), \
+                            'cosyvoice.cli.cosyvoice': cli, 'torch': types.ModuleType('torch')}
+            with patched_modules(fake_modules), \
                  patch('app.engines.cosyvoice.engine._install_paths'), \
                  patch('app.engines.cosyvoice.engine._patch_load_wav'), \
                  preflight.offline_environment():
