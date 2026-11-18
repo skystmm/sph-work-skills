@@ -84,7 +84,9 @@ mkdir -p "$VOICE_TTS_ROOT/models"
 "$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/install_agent_skill.py" install
 ```
 
-安装器将技能入口写入 `~/.agents/skills/local-tts` 与 `~/.codebuddy/skills/local-tts`，不会复制后端、模型或音色。它不会覆盖用户修改或过期的同名技能；需要更新时先检查，再按照安装器的保护规则卸载、重装。实际客户端是否发现技能以及是否允许执行，需在对应客户端验证。
+安装器将主技能写入 `~/.agents/skills/local-tts` 与 `~/.codebuddy/skills/local-tts`；Claude Code 入口写入 `~/.claude/commands/voice_gen.md` 和 `voice_clone.md`，Codex 入口写入 `~/.agents/skills/voice-gen/SKILL.md` 和 `voice-clone/SKILL.md`，不会复制后端、模型或音色。在支持并安装这些入口的宿主对话中使用 `/voice_gen`、`/voice_clone` 或 `$voice-gen`、`$voice-clone`，它们不是 shell 命令。
+
+升级先运行 `check`。只有与已知旧模板逐字匹配、安装标记有效且指向同一后端根目录的自有旧入口可安全迁移为新生成入口，并保留可恢复备份。未知、已修改、符号链接或含额外文件的冲突会在写入前停止，不强制卸载或覆盖；不删除录音、音色、任务或音频。实际客户端是否发现技能以及是否允许执行，需在对应客户端验证。
 
 ## 5. 音色、测试与模式
 
@@ -110,22 +112,26 @@ mkdir -p "$VOICE_TTS_ROOT/models"
 "$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/tts_cli.py" synth --text '你好，这是一段测试。' --voice my_voice --model voxcpm2 --output-dir /绝对路径/产出目录
 ```
 
-若用户明确希望尝试同一参考录音加对应逐字稿的可选模式：
+按 Skill 默认使用同一参考录音加对应逐字稿的 `reference_plus_prompt` 模式，先确认逐字稿，再以相同模式预览和合成：
+
+```bash
+"$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/tts_cli.py" parse --model voxcpm2 --reference-mode reference_plus_prompt --text '你好，这是一段测试。'
+```
 
 ```bash
 "$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/tts_cli.py" synth --text '你好，这是一段测试。' --voice my_voice --model voxcpm2 --reference-mode reference_plus_prompt --output-dir /绝对路径/产出目录
 ```
 
-该模式要求非空且与录音相符的逐字稿，系统不能自动验证文字是否匹配。它与情绪标签冲突；用户须明确选择原模式或确认本次丢弃情绪，不能静默降级。两种模式的音色和稳定性均需试听；新模式暂不支持逐块诊断日志。
+该模式要求非空且经用户确认与录音逐字相符的 `prompt_text`，系统不能自动验证文字是否匹配。缺失或不确定时先询问并暂停生成，不臆造逐字稿，也不自动回退 `reference`。它与情绪标签冲突；用户须明确选择 `reference` 模式或确认本次使用 `--drop-control emotion`，不能静默降级。两种模式的音色和稳定性均需试听；新模式不支持 `--diagnostic-log`，要求日志时先说明限制并询问，不自动切换模式或忽略日志要求。
 
-Skill 未指定模型时显式选择 `voxcpm2`；**直接使用 CLI 时仍由 `config.yaml` 的 `engine` 决定**，仓库配置保留 `cosyvoice3`。直接 CLI 测试 VoxCPM 时请显式传 `--model voxcpm2`。本技能发布包面向 CLI，不包含独立启动的 HTTP 服务。其他引擎的依赖另行准备；CosyVoice 需要其上游源码与推理依赖。
+Skill 未指定模型时显式选择 `voxcpm2`；所选模型为 VoxCPM2 且用户未指定参考模式时，在 `parse --model voxcpm2` 和 `synth` 都显式传入 `--reference-mode reference_plus_prompt`。用户明确选择参考模式时两步一致遵循用户选择；其他引擎不传 `--reference-mode`。**直接使用 CLI/API 的参考模式默认仍为 `reference`，模型仍由 `config.yaml` 的 `engine` 决定**，仓库配置保留 `cosyvoice3`；Skill 不修改配置或后端默认值。直接 CLI 测试 VoxCPM 时请显式传 `--model voxcpm2`。本技能发布包面向 CLI，不包含独立启动的 HTTP 服务。其他引擎的依赖另行准备；CosyVoice 需要其上游源码与推理依赖。
 
 ## 6. 注音、长文与安全
 
-VoxCPM2 的 `[重=chong2]` 注音和 `<emotion type="happy">文字</emotion>` 情绪控制是实验能力。先预览转换；用户确认本次风险后，才分别添加 `--accept-control phoneme` 或 `--accept-control emotion`：
+VoxCPM2 的 `[重=chong2]` 注音和 `<emotion type="happy">文字</emotion>` 情绪控制是实验能力。按 Skill 默认模式预览注音如下；用户确认本次风险后，才添加 `--accept-control phoneme`。情绪仅在用户明确选择 `reference` 模式并确认实验风险后才可使用 `--accept-control emotion`，或明确选择在新模式下本次 `--drop-control emotion`，不得自动处理：
 
 ```bash
-"$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/tts_cli.py" parse --model voxcpm2 --text '请[重=chong2]新开始。'
+"$VOICE_TTS_ROOT/.venv/bin/python" "$VOICE_TTS_ROOT/scripts/tts_cli.py" parse --model voxcpm2 --reference-mode reference_plus_prompt --text '请[重=chong2]新开始。'
 ```
 
 `[break 500]` 表示额外插入 500 毫秒数字静音，不保证听感上的总停顿恰好 500 毫秒。标签不能嵌套，VoxCPM 当前不支持精确变速和流式；不支持的控制不得静默删除或自动切换模型。具体控制方式见 [SKILL.md](SKILL.md)。

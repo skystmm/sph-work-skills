@@ -38,7 +38,7 @@
 
 `local-tts` 需要单独准备本地后端、推理依赖和模型，请参阅 [local-tts 安装指南](skills/local-tts/install-guide.md)。也可以将以下提示发送给支持本地技能和命令的 Agent：
 
-> 按照 `https://github.com/skystmm/sph-work-skills` 仓库的 `skills/local-tts/install-guide.md` 安装 `local-tts` skill。
+> 请按照 `https://github.com/skystmm/sph-work-skills` 仓库的 `skills/local-tts/install-guide.md` 安装 `local-tts` 技能，并在下载 VoxCPM2 模型前先征得我的同意。
 
 其他技能可将所需 skill 目录（如 `skills/short-video-compliance-judge/`）复制到本机 WorkBuddy 技能目录：
 
